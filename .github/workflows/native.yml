@@ -40,7 +40,6 @@ jobs:
   approval:
     needs: admission
     if: needs.admission.outputs.fork == 'true'
-    environment: native-approval
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
