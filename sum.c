@@ -1,2 +1,2 @@
 #include <stdio.h>
-int main(void) { printf("%d\n", 19 + 23); return 0; }
+int main(void) { printf("%d\n", 40 + 2); return 0; }
