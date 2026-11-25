@@ -1,0 +1,73 @@
+name: Protected native gate rehearsal
+run-name: '${{ github.event.workflow_run.head_sha }}'
+on:
+  workflow_run:
+    workflows: [Disposable basics]
+    types: [completed]
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+concurrency:
+  group: native-rehearsal-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+jobs:
+  admission:
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      source: ${{ steps.admit.outputs.source }}
+      number: ${{ steps.admit.outputs.number }}
+      fork: ${{ steps.admit.outputs.fork }}
+    steps:
+      - id: admit
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const trigger = context.payload.workflow_run;
+            const {data: run} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: trigger.id});
+            if (run.path !== '.github/workflows/basics.yml' || run.event !== 'pull_request' ||
+                run.repository.id !== context.payload.repository.id || run.conclusion !== 'success' ||
+                run.head_sha !== trigger.head_sha || run.run_attempt !== trigger.run_attempt) throw Error('Wrong producer');
+            const prs = await github.paginate(github.rest.pulls.list, {...context.repo, state:'open',
+              head: `${run.head_repository.owner.login}:${run.head_branch}`});
+            const pr = prs.find(pr => pr.head.sha === run.head_sha && pr.head.repo.id === run.head_repository.id);
+            if (!pr) throw Error('Not a current open PR head');
+            core.setOutput('source', pr.head.sha);
+            core.setOutput('number', String(pr.number));
+            core.setOutput('fork', String(pr.head.repo.id !== pr.base.repo.id));
+  approval:
+    needs: admission
+    if: needs.admission.outputs.fork == 'true'
+    environment: native-approval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify a recorded maintainer review for this run
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const {data: reviews} = await github.rest.actions.getReviewsForRun({...context.repo, run_id: context.runId});
+            if (!reviews.some(r => r.state === 'approved' && r.user.login === 'michaelneale' &&
+                r.environments.some(e => e.name === 'native-approval'))) throw Error('Missing maintainer approval');
+            core.info('This run has its own maintainer approval.');
+  native_marker:
+    name: Native-stage marker only - no lab access
+    needs: [admission, approval]
+    if: >-
+      !cancelled() && needs.admission.result == 'success' &&
+      (needs.admission.outputs.fork == 'false' || needs.approval.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check current head again before the harmless native-stage marker
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          PR: ${{ needs.admission.outputs.number }}
+          SOURCE: ${{ needs.admission.outputs.source }}
+        with:
+          script: |
+            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number:Number(process.env.PR)});
+            if (pr.state !== 'open' || pr.head.sha !== process.env.SOURCE) throw Error('Superseded candidate');
+            core.info(`NATIVE_MARKER_REACHED source=${pr.head.sha} fork=${pr.head.repo.id !== pr.base.repo.id}`);
